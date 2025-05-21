@@ -1,5 +1,111 @@
 
-# Failure to Handle Auction Winner Payment Failure Leads to Loss of Funds
+
+# [H-01] Dividends Manipulation in Staker.sol via Stale `cumulativeETHPerSIRx80` Values in Staking/Unstaking Functions
+
+---
+
+**Description:**
+The issue arises from how the `cumulativeETHPerSIRx80` value is handled in the `stake()` and `unstake()` functions. When a user stakes or unstakes tokens, the `cumulativeETHPerSIRx80` value is not updated immediately to reflect the most recent changes. This results in **stale or outdated data** being used for dividend calculations. Specifically, when staking or unstaking, the protocol does not immediately update the `cumulativeETHPerSIRx80` value, allowing users to potentially exploit the system and receive more or fewer dividends than they are entitled to.
+
+---
+
+#### **Impact:**
+
+1. **Incorrect Dividend Distribution:**
+   Since the dividend calculations depend on `cumulativeETHPerSIRx80`, using outdated or stale values can lead to **incorrect dividend payouts**. Users may either overclaim or underclaim rewards, leading to an unfair distribution of funds.
+
+2. **Unfair Advantage to Users:**
+   Users can gain an unfair advantage by staking or unstaking at certain times when the `cumulativeETHPerSIRx80` value is outdated. This allows them to claim dividends based on stale data, which could be exploited to receive a disproportionate amount of rewards.
+
+3. **Potential for Front-Running Attacks:**
+   The lack of immediate update for `cumulativeETHPerSIRx80` creates a potential attack vector where an attacker can **front-run** staking or unstaking actions. By exploiting the stale value, the attacker can optimize their staking/unstaking strategy to receive larger dividend payouts than they should.
+
+4. **Economic Instability and Trust Issues:**
+   The inconsistencies in dividend calculations can lead to **economic instability** within the staking system. If users lose confidence in the fairness of the protocol, it may lead to reduced participation and a **loss of trust** in the staking mechanism.
+
+---
+
+#### **Proof of Concept:**
+Here is a step-by-step walkthrough of how an attack may occur due to the stale `cumulativeETHPerSIRx80` value:
+
+### 1. **Initial Conditions:**
+
+* The attacker is aware of the staking pool's state and the last update of `cumulativeETHPerSIRx80`.
+* There is a significant amount of unclaimed ETH in the system, which has accumulated over time.
+* The attacker monitors the `cumulativeETHPerSIRx80` value and identifies when it has not been updated for some time, meaning the value is stale.
+
+### 2. **Staking Activity:**
+
+* The attacker begins by staking a large amount of SIR tokens into the protocol at a time when the `cumulativeETHPerSIRx80` value is outdated. This action does not trigger an immediate update to the `cumulativeETHPerSIRx80` value.
+* The protocol incorrectly calculates the attacker’s dividends because it uses the stale `cumulativeETHPerSIRx80` value, which doesn’t reflect the current staking activity or the correct reward share for this user.
+
+### 3. **Timing for Unstaking or Re-staking:**
+
+* The attacker waits for a moment when the `cumulativeETHPerSIRx80` value is still stale, and they unstake or restake their tokens.
+* This action again does not update the `cumulativeETHPerSIRx80` immediately, allowing the attacker to exploit the stale value once more.
+* The attacker may execute a series of staking and unstaking actions, further manipulating the `cumulativeETHPerSIRx80` value to optimize their dividend payout.
+
+### 4. **Dividend Claiming:**
+
+* After performing these staking/unstaking actions, the attacker claims their dividends. Due to the stale `cumulativeETHPerSIRx80` value, the dividend calculations are incorrect.
+* The attacker receives more dividends than they should because the protocol incorrectly uses the outdated cumulative ETH values associated with their stake.
+
+### 5. **Final Outcome:**
+
+* The attacker continues this process until they have extracted a disproportionate amount of rewards, exploiting the protocol's failure to update critical state variables such as `cumulativeETHPerSIRx80`.
+* Users who follow the protocol correctly, staking and unstaking at the right times with correct calculations, will receive less in dividends as the attacker exploits the stale data.
+
+---
+
+#### **Recommended Mitigation:**
+
+1. **Immediate Update of `cumulativeETHPerSIRx80`:**
+   The `cumulativeETHPerSIRx80` value should be immediately updated within the `stake()` and `unstake()` functions after each staking or unstaking action. This ensures that the value used for calculating dividends is always the most up-to-date.
+
+2. **Recalculation of Dividends:**
+   Ensure that dividends are recalculated with the latest `cumulativeETHPerSIRx80` value before any reward claims are processed. This can be achieved by directly updating or recalculating the `cumulativeETHPerSIRx80` value within the staking/unstaking functions.
+
+3. **Introduce Locking or Delayed Claim Mechanism:**
+   To prevent front-running, consider introducing a **lock** period or **delayed claim** mechanism. For example, implement a cooldown period between staking/unstaking actions and dividend claims, reducing the likelihood of front-running attacks.
+
+4. **Transparent Event Logging:**
+   Log the updates to the `cumulativeETHPerSIRx80` value and other relevant state variables after each staking and unstaking action. This enhances transparency and ensures that any discrepancies can be quickly identified during audits.
+
+---
+
+#### **Severity Rating:** High
+This issue can lead to unfair dividend distribution, potential exploits, and a loss of trust in the protocol, making it a significant vulnerability.
+
+---
+
+#### **Likelihood:** Medium
+While the issue is critical, it requires precise timing or front-running techniques to exploit the protocol. However, as the protocol becomes more active and widely used, the likelihood of exploitation increases.
+
+---
+
+#### **Potential Exploits and Attack Vectors:**
+
+1. **Front-Running Exploits:**
+
+   * Attackers can exploit stale `cumulativeETHPerSIRx80` values by performing staking or unstaking actions at a specific time, taking advantage of outdated data to receive more dividends than they should.
+
+2. **Manipulation of Dividends:**
+   Users could manipulate their dividend claims by interacting with the protocol at a time when the `cumulativeETHPerSIRx80` value is outdated, giving them a financial advantage in terms of overclaimed rewards.
+
+3. **Economic Exploits via Stale Values:**
+   Users or bots may interact with the protocol in such a way as to trigger **reward inflation**, causing a misalignment in dividend distribution. This can destabilize the ecosystem and reduce user confidence in the system.
+
+4. **Denial of Service via Gas Exploitation:**
+   By manipulating the timing of staking/unstaking actions, attackers could potentially exploit gas costs or transaction timing to force inefficient contract execution, potentially leading to a **denial of service** scenario for others.
+
+---
+
+In conclusion, the stale `cumulativeETHPerSIRx80` value handling in the `stake()` and `unstake()` functions introduces several significant risks, including economic exploits, unfair dividend distributions, and front-running vulnerabilities. Immediate updates and recalculations of this value, along with mechanisms to prevent front-running, are essential to mitigating these risks and ensuring the fairness and stability of the staking system.
+
+---
+
+
+# [M-01] Failure to Handle Auction Winner Payment Failure Leads to Loss of Funds
 ## Summary
 The `collectFeesAndStartAuction` function in the `Staker.sol` contract does not check the success status of the `_payAuctionWinner` call. If the transfer of the auction lot to the previous winner fails (e.g., due to a problematic token or recipient), the function proceeds as if the payment was successful, causing the previous winner to lose their lot, which is then included in the subsequent auction.
 
@@ -492,4 +598,276 @@ This test demonstrates that Alice's winning lot was not transferred to her and w
 ## Recommendation
 The `collectFeesAndStartAuction` function should check the boolean return value of the `_payAuctionWinner` call. If the previous auction had a bid (`auction.bid > 0`) and the payment failed (`!paymentSuccessful`), the function should revert. This prevents the previous winner's lot from being lost and ensures the auction state remains consistent, potentially allowing the previous winner to claim via `getAuctionLot` later or enabling manual intervention.
 
+# [M-02] Signature Malleability in is possible in the permit Function
+
+### Severity
+Impact: Medium
+
+Likelihood: Medium  
+
+### Description
+
+The `permit` function in the `Staker.sol` contract does not restrict the ECDSA signature’s `s value` to the lower half of the secp256k1 curve’s order `(s <= N/2, where N is 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141)`. This enables signature malleability, allowing a valid signature `(r, s, v)` to be transformed into another valid signature `(r, N - s, v')` without the private key.
+An attacker can exploit this by observing a user’s permit transaction in the mempool, computing the malleable signature, and submitting it with higher gas fees. If the attacker’s transaction is mined first, it consumes the user’s nonce `(nonces[owner])`, incrementing it from `n to n+1`. The user’s transaction then fails as the nonce in their signature `(n)` no longer matches `nonces[owner] (n+1)`, reverting with `InvalidSigner()`.
+
+```solidity
+    function permit(
+        address owner,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) public {
+        if (deadline < block.timestamp) revert PermitDeadlineExpired();
+
+        // Unchecked because the only math done is incrementing
+        // the owner's nonce which cannot realistically overflow.
+        unchecked {
+            address recoveredAddress = ecrecover(
+                keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        DOMAIN_SEPARATOR(),
+                        keccak256(
+                            abi.encode(
+                                keccak256(
+                                    "Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"
+                                ),
+                                owner,
+                                spender,
+                                value,
+                                nonces[owner]++,
+                                deadline
+                            )
+                        )
+                    )
+                ),
+                v,
+                r,
+                s
+            );
+
+            if (recoveredAddress == address(0) || recoveredAddress != owner) revert InvalidSigner();
+
+            allowance[recoveredAddress][spender] = value;
+        }
+
+        emit Approval(owner, spender, value);
+    }
+```
+The lack of a check on the `s` value allows an attacker to submit a malleable signature, consuming the nonce and causing the user’s transaction to revert. This disrupts user transactions and potentially breaking downstream logic dependent on successful permit calls.
+
+### Recommendations
+
+Enforce s <= N/2 by adding the following check before the ecrecover call:
+```solidity
+if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) revert InvalidSigner();
+```
+
+
+# [L-01] Type Mismatch in OracleInitialized and UniswapOracleProbed Events
+### Summary
+A type mismatch exists between the interface (`IOracle`) and implementation (`Oracle`) for the `avLiquidity` parameter in the `OracleInitialized` and `UniswapOracleProbed` events. The interface defines `avLiquidity` as `uint160`, while the implementation uses `uint136`.
+
+### Vulnerability Details
+- In the `IOracle` interface:
+  - `OracleInitialized` event: `avLiquidity` is `uint160`.
+  - `UniswapOracleProbed` event: `avLiquidity` is `uint160`.
+- In the `Oracle` contract:
+  - `OracleInitialized` event: `avLiquidity` is `uint136`.
+  - `UniswapOracleProbed` event: `avLiquidity` is `uint136`.
+- The mismatch occurs because the implementation uses `uint136` for `avLiquidity` (aligned with the `UniswapOracleData` struct), while the interface expects `uint160`.
+
+### Impact
+- ABI encoding/decoding inconsistencies may occur when interacting with the contract via the interface.
+- Off-chain applications parsing events may encounter errors or misinterpret data, expecting `uint160` instead of `uint136`.
+- Potential integration issues with tools or contracts relying on the interface's event signature.
+
+### Tools Used
+- Manual code review
+
+### Recommended Mitigation
+Update the `IOracle` interface to use `uint136` for `avLiquidity` in both events to match the implementation:
+
+```solidity
+event OracleInitialized(
+    address indexed token0,
+    address indexed token1,
+    uint24 indexed feeTierSelected,
+    uint136 avLiquidity,
+    uint40 period
+);
+
+event UniswapOracleProbed(
+    uint24 fee,
+    uint136 avLiquidity,
+    uint40 period,
+    uint16 cardinalityToIncrease
+);
+```
+
+
+# [I-01] Missing Error Message in onlyVault Modifier Require Statement
+
+#### Severity
+Impact: Informational
+
+Likelihood: Medium  
+
+### Description
+
+The `onlyVault` modifier in the `APE` contract uses a require statement to restrict calls to the vault contract, but it lacks an error message:
+```solidity
+modifier onlyVault() {
+    address vault = _getArgAddress(1);
+    require(vault == msg.sender);
+    _;
+}
+```
+This modifier is applied to the initialize, mint, and burn functions, ensuring only the vault (stored as an immutable argument) can call them. Without an error message, a revert provides no context about the failure.
+
+### Recommendations
+Add an error message to the require statement to improve  user experience.
+```solidity
+modifier onlyVault() {
+    address vault = _getArgAddress(1);
+    require(vault == msg.sender, "APE: caller is not the vault");
+    _;
+}
+```
+
+
+# [I-02] No Zero-Address Validation in transfer and transferFrom Functions
+#### Severity
+Impact: High
+
+Likelihood: Low  
+
+### Description
+
+The `transfer` and `transferFrom` functions in the `APE` contract do not validate that the to address is non-zero, allowing tokens to be sent to `address(0)`:
+
+```solidity
+function transfer(address to, uint256 amount) external returns (bool) {
+    balanceOf[msg.sender] -= amount;
+    unchecked {
+        balanceOf[to] += amount;
+    }
+    emit Transfer(msg.sender, to, amount);
+    return true;
+}
+
+function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+    uint256 allowed = allowance[from][msg.sender];
+    if (allowed != type(uint256).max) allowance[from][msg.sender] = allowed - amount;
+    balanceOf[from] -= amount;
+    unchecked {
+        balanceOf[to] += amount;
+    }
+    emit Transfer(from, to, amount);
+    return true;
+}
+```
+Transferring tokens to `address(0)` increases `balanceOf[address(0)]` without decreasing `totalSupply`. The `totalSupply` includes locked tokens, misleading dApps or users expecting it to reflect circulating supply.
+
+### Recommendations
+
+Add zero-address validation to both functions to prevent token loss
+
+# [I-03] Missing Stake-Specific Events in stake and unstake Functions
+
+#### Severity
+Impact: High
+
+Likelihood: Low  
+
+### Description
+
+The `stake` and `unstake` functions in the Staker contract emit only `Transfer` events to track staking and unstaking activities, without dedicated events for these actions. This makes it harder for off-chain applications `(e.g., indexers, wallets, dashboards)` to track staking-specific activities efficiently.
+
+The stake function emits:
+```solidity
+emit Transfer(msg.sender, STAKING_VAULT, amount);
+```
+The unstake function emits:
+```solidity
+emit Transfer(STAKING_VAULT, msg.sender, amount);
+```
+While these Transfer events allow tracking via the `STAKING_VAULT`, they require additional filtering to distinguish `staking/unstaking` from regular token transfers. This increases complexity for off-chain systems.
+
+
+# [I-01] Unused OracleAlreadyInitialized Error in Oracle Contract  
+
+### Summary
+The `OracleAlreadyInitialized` error is defined in the `Oracle` contract and `IOracle` interface but is not used in the implementation, making it dead code.
+
+### Vulnerability Details
+- Error declared in `Oracle` contract and `IOracle` interface: 
+
+```solidity
+error OracleAlreadyInitialized();
+```
+
+- In the `initialize` function, the contract checks `oracleState.initialized` but returns early instead of reverting with the error:
+  
+  ```solidity
+  if (oracleState.initialized) return;
+  ```
+- No other function uses this error.
+
+### Impact 
+- No functional or security impact. Just dead code
+
+### Tools Used
+
+- Manual code review
+
+### Recommended Mitigation
+Remove the unused error from both the `Oracle` contract and `IOracle` interface:
+
+
+
+
+#### **Description:**
+
+In the `stake()` function, the SIR protocol does not enforce a minimum non-zero stake. There is no check like `require(amount > 0)` to prevent users from staking 0 SIR. This means anyone can spam the contract with meaningless staking entries that contribute nothing to the system. These zero-value stakes still update internal mappings and the global `stakingParams.stake` via a temporary memory variable, causing unnecessary state growth.
+
+Because each stake operation initializes or updates a `Staker` struct, repeated `stake(0)` calls across multiple wallets can clutter the `_stakers` mapping and artificially inflate the perceived user base. This increases the size and complexity of on-chain data, causing long-term gas inefficiency and possibly leading to Denial of Service (DoS) if gas limits are eventually exceeded in aggregate stake accounting.
+
+---
+
+
+#### **Proof of Concept:**
+
+```solidity
+// Stake 0 SIR multiple times from multiple wallets
+sir.stake(0);
+
+// No revert, still creates entries in _stakers
+// Causes unnecessary updates to stakingParams and _supply tracking
+```
+
+#### **Recommended Mitigation:**
+
+Add a minimum stake check at the start of the `stake()` function:
+
+```solidity
+require(amount > 0, "Cannot stake zero");
+```
+
+Optionally, enforce a protocol-wide minimum stake threshold (e.g. `minStakeAmount`) configurable via governance to limit micro-stakes that could still be used for griefing.
+
+---
+
+#### **Severity: Medium**
+
+* **Medium** It allows long-term protocol degradation and opens room for operational DoS if staker state becomes too large.
+
+**Likelihood: High**
+
+* Easy to exploit (no permission needed).
+* Cheap to execute repeatedly using multiple wallets.
+* No mitigation currently exists in the contract.
 
