@@ -755,6 +755,140 @@ This prevents no-op transactions, improves clarity, and reduces unnecessary stat
 ### Recommended Mitigation
 Add a check in `updateVaultsIssuances` to enforce the tax constraint. Update scripts to validate taxes before submission.
 
+# [L-04] Undocumented Fee on TEA Token Minting
+
+### Summary
+The protocol documentation, specifically the section detailing the fee structure, focuses on fees generated from the minting and burning of APE tokens, which reward Liquidity Providers ("Gentlemen"). However, this documentation omits that a fee is also levied on Liquidity Providers themselves when they mint TEA tokens (i.e., when providing liquidity). The smart contracts implement this TEA minting fee, with the collected portion contributing to Protocol Owned Liquidity (POL). This discrepancy can lead to a misunderstanding of the complete fee mechanics for Liquidity Providers.
+
+### Description of Issue
+
+The provided documentation snippet concerning fees states
+
+```
+Vaults feature a fee system that rewards the gentlemen with significant fees from the minting and burning of APE tokens. These fees vary by vault, increasing with the vault's leverage ratio. Although these fees are substantial, they allow apes to hold APE tokens without incurring any maintenance fees, regardless of the holding period. The fees for minting or burning APE tokens are on par with the costs of holding a margin position for approximately one year, striking a balance between potential returns and upfront costs. This structure aims to benefit liquidity providers and encourage long-term traders, while short-term traders may not see their speculative positions fully materialize, essentially contributing more to the ecosystem's finances through these initial fees.
+```
+
+This section exclusively describes fees related to APE token activities and their role in rewarding Liquidity Providers. It does not mention any fees applicable to Liquidity Providers when they mint TEA tokens.
+
+However, an examination of the ```Vault.sol``` and ```TEA.sol``` contracts reveals the implementation of such a fee:
+
+- ```Vault.sol - _mint function:``` When a user mints TEA tokens (```isAPE == false```), the ```_mint``` function calls the mint function inherited from ```TEA.sol```. A comment within this block explicitly notes the distribution of fees to Protocol Owned Liquidity:
+
+```solidity
+// In Vault.sol, _mint function
+// ...
+} else {
+    // Mint TEA and distribute fees to protocol owned liquidity (POL)
+    (fees, amount) = mint( // This calls the mint function from TEA.sol
+        minter,
+        vaultParams.collateralToken,
+        vaultState.vaultId,
+        systemParams_,
+        vaultIssuanceParams_,
+        reserves,
+        collateralToDeposit
+    );
+}
+```
+ ```TEA.sol - mint function:``` This function, responsible for minting TEA tokens, clearly calculates and applies a fee based on ```systemParams_.lpFee.fee.``` The portion of TEA tokens corresponding to this fee is then minted to the protocol itself (```address(this)```), thereby increasing POL.
+
+```solidity
+// In TEA.sol, mint function
+// ...
+// Split collateralDeposited between minter and POL
+fees = Fees.feeMintTEA(collateralDeposited, systemParams_.lpFee.fee);
+
+// Minter's share of TEA
+// 'amount' is calculated based on fees.collateralInOrWithdrawn (net collateral)
+amount = FullMath.mulDiv(
+    amountToPOL,
+    fees.collateralInOrWithdrawn,
+    // ... (denominator logic) ...
+);
+
+// POL's share of TEA
+amountToPOL -= amount; // 'amountToPOL' initially represented total TEA from gross deposit
+
+// Update total supply and protocol balance
+// ...
+totalSupplyAndBalanceVault_.balanceVault += uint128(amountToPOL); // Protocol's TEA balance increases
+// ...
+
+// Emit (mint) transfer events
+emit TransferSingle(minter, address(0), minter, vaultId, amount); // To minter
+emit TransferSingle(minter, address(0), address(this), vaultId, amountToPOL); // Fee portion to protocol (POL)
+```
+This implemented fee on TEA minting is not reflected in the user-facing documentation regarding the protocol's fee structure.
+
+### Impact
+
+LPs might not be aware that a portion of their deposited collateral is effectively taken as a fee when minting TEA tokens, as the documentation focuses on APE token fees as their reward source. They might expect the amount of TEA tokens received to be directly proportional to their full collateral deposit.
+
+
+### Recommendation
+To ensure full transparency and align documentation with the on-chain behavior, it is recommended to update the protocol's fee documentation. The updated documentation should clearly
+
+1. State that a fee is applied when Liquidity Providers (Gentlemen) mint TEA tokens.
+2. Explain the basis for this fee calculation (e.g., derived from ```systemParams_.lpFee.fee```).
+3. Describe the purpose and destination of this fee, specifically its contribution to Protocol Owned Liquidity (POL), and briefly explain the benefits of POL to the ecosystem.
+
+
+# [L-05] Discrepancy in Saturation Price Calculation
+
+### Summary
+The ```_updateVaultState``` function calculates and stores a compressed representation of a vault's state, including ```tickPriceSatX42```, which defines the boundary between the "Power Zone" (ideal constant leverage) and the "Saturation Zone" (liquidity-constrained). Within the logic for the Saturation Zone, there is a significant discrepancy between the mathematical formula for the saturation price (```priceSat```) implied by the implemented code and the formula stated in the accompanying code comment. This can lead to the vault operating with an incorrect saturation price threshold, potentially affecting P&L calculations and the transition between operational zones.
+
+### Description of Issue
+The issue lies in the calculation of ```tickPriceSatX42``` when ```isPowerZone``` is ```false``` (i.e., the vault is determined to be in the Saturation Zone).
+
+**Commented Intention:** The code comment for the Saturation Zone states the target formula as:
+
+```plaintext
+/*
+    PRICE IN SATURATION ZONE
+    priceSat = r*price*L/R
+ */
+```
+Assuming ```price``` is the current price (```priceCurrent```), this implies ```priceSat / priceCurrent = (r * L) / R```. In tick space, this would translate to: ```tickSat - tickCurrent = tick( (r * L) / R )``` ````tickSat = tickCurrent + tick( (r * L) / R )```
+
+**Implemented Logic (for positive leverageTier):** The code calculates tickRatioX42 as:
+
+```solidity
+int256 tickRatioX42 = TickMathPrecision.getTickAtRatio(
+    uint256(vaultState.reserve) << absLeverageTier, // Numerator: R * (l-1)
+    (uint256(reserves.reserveLPers) << absLeverageTier) + reserves.reserveLPers // Denominator: L * l
+);
+// Where 'l' is the effective leverage factor (1 + 2^absLeverageTier)
+// and 'l-1' is (2^absLeverageTier)
+```
+So, ```tickRatioX42 = tick( (R * (l-1)) / (L * l) )```.
+
+Then, ```tickPriceSatX42``` is computed as:
+
+```solidity
+int256 tempTickPriceSatX42 = reserves.tickPriceX42 - tickRatioX42;
+```
+
+This means ```tickSat = tickCurrent - tick( (R * (l-1)) / (L * l) )```.
+
+Converting the implemented logic back to price terms: ```priceSat / priceCurrent = 1 / ( (R * (l-1)) / (L * l) ) priceSat / priceCurrent = (L * l) / (R * (l-1))``` So, ```priceSat = priceCurrent * (L * l) / (R * (l-1))```.
+
+The implemented formula ```priceSat = priceCurrent * (L * l) / (R * (l-1))``` does not match the commented formula ```priceSat = r * price * L / R```. For the two to be equivalent,```r``` would need to be equal to ```l / (l-1)```. If ```r``` is intended to be simply ```l``` (the leverage factor), or another distinct system parameter, the implementation is incorrect relative to the comment.
+
+### Impact
+If the commented formula (```priceSat = r*price*L/R```) represents the true intended mathematical model for the saturation price in this zone, then the current implementation is incorrect. This would lead to:
+
+- Incorrect ```tickPriceSatX42``` Storage: The on-chain ```tickPriceSatX42``` will not accurately reflect the intended saturation threshold.
+- The point at which the vault's behavior (and thus P&L calculations for LPers and Apes) transitions from the Power Zone to the Saturation Zone (and vice-versa, as determined by comparing the current market price tick with ```tickPriceSatX42``` in the ```VaultExternal.getReserves``` function) will be based on this potentially incorrect value.
+- Depending on how ```tickPriceSatX42``` influences the distribution of value between LPers and Apes (especially how ```reserveApes``` and ```reserveLPers``` are calculated in ```VaultExternal._getReserves``` based on this stored ```tickPriceSatX42```), an incorrect saturation threshold could lead to unfair or unintended economic outcomes for participants. For example, it might cause the system to enter or exit the "fixed DBT value for LPs" mode at the wrong price points.
+
+### Recommendation
+
+If the formula in the comment** (```priceSat = r*price*L/R```) is correct, the Solidity implementation for calculating ```tickRatioX42``` and its subsequent application (addition or subtraction, and the ratio itself) must be revised to accurately reflect this formula.
+
+If the current code's derived formula** (```priceSat = priceCurrent * (L*l) / (R*(l-1))```) is correct and intended, then the comment must be updated to accurately describe the implemented logic. The definition and role of ```r``` (if it's different from ```l/(l-1)```) would also need clarification.
+  
+
 # [I-01] Missing Error Message in onlyVault Modifier Require Statement
 
 #### Severity
@@ -942,4 +1076,15 @@ Gas inefficiency and unnecessary logs/operations.
 Add a check to skip execution if `dividends_` is 0.
 
 
+# [I-06] Missing Reserve Initialization in Vault.sol 
 
+### Description
+
+The `Vault.initialize()` function in the SIR Protocol fails to explicitly initialize the `reserveApes` value when creating a new vault. This oversight leaves the `reserves.reserveApes` field uninitialized and potentially filled with non-zero garbage data from unclean memory. The `APE.mint()` function assumes that a zero `totalSupply` implies a safe "first mint" state and uses the passed-in `reserves.reserveApes` without validation. If this value is unintentionally high due to uninitialized memory, the minting logic will over-mint APE tokens on first deposit, allowing inflation of the token supply far beyond the actual collateral provided.
+
+
+### Impact 
+This can break the peg or value of APE tokens, and bankrupt vaults.
+
+### Recommendation
+Explicitly set `reserves.reserveApes = 0` and `reserves.reserveLPers = 0` during vault initialization.
