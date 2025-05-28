@@ -708,6 +708,52 @@ event UniswapOracleProbed(
 );
 ```
 
+# [L-02] Missing Input Validation In The stake Fucntion
+### Summary
+The `stake(uint80 amount)` function does not validate whether the input amount is greater than zero. As a result, it is possible for users to call the function with a zero value, leading to unnecessary state reads and writes, gas consumption, and emission of meaningless events.
+
+### Vulnerability Details
+```
+function stake(uint80 amount) public {
+    ...
+    uint80 newBalanceOfSIR = balance.balanceOfSIR - amount;
+
+    unchecked {
+        balances[msg.sender] = Balance(newBalanceOfSIR, _dividends(...));
+        stakerParams.stake += amount;
+        ...
+        emit Transfer(msg.sender, STAKING_VAULT, amount);
+    }
+}
+```
+When `amount == 0`, the function performs no meaningful state updates but still emits a Transfer event and consumes gas.
+
+### Impact
+- Users (or bots) can invoke the function with zero-value stakes, causing unnecessary computation and state transitions.
+
+- Emitting Transfer events with a zero amount can pollute the on-chain event history, making it harder to audit and increasing log indexing bloat.
+
+- Repeated zero-value transactions serve no useful purpose and may open the door to low-cost denial-of-service spam under certain conditions.
+
+### Recommended Mitigation
+Add a validation check to ensure that the staked amount is strictly greater than zero:
+
+```solidity
+require(amount > 0, "Cannot stake zero amount");
+```
+This prevents no-op transactions, improves clarity, and reduces unnecessary state changes and event emissions.
+
+# [L-03] Incorrect Tax Constraint Enforcement in StartLiquidityMining and ChangeLiquidityMining
+
+### Vulnerability Details
+`SirStructs` library specifies that vault taxes must satisfy `Σ_i (tax_i / type(uint8).max)^2 ≤ 0.1^2`. The `StartLiquidityMining` script sets `newTaxes[0] = 228`, `newTaxes[1] = 114`, yielding `(228/255)^2 + (114/255)^2 ≈ 0.998 < 0.01`. However, neither the script nor the `updateVaultsIssuances` function in `ISystemControl` programmatically validates this constraint. If the implementation fails to enforce it, adding more vaults or higher taxes could violate the constraint, causing reverts or incorrect reward distributions.
+
+### Impact
+
+- Violation of the tax constraint could halt vault updates or misallocate SIR rewards, affecting protocol fairness.
+
+### Recommended Mitigation
+Add a check in `updateVaultsIssuances` to enforce the tax constraint. Update scripts to validate taxes before submission.
 
 # [I-01] Missing Error Message in onlyVault Modifier Require Statement
 
@@ -797,8 +843,15 @@ emit Transfer(STAKING_VAULT, msg.sender, amount);
 ```
 While these Transfer events allow tracking via the `STAKING_VAULT`, they require additional filtering to distinguish `staking/unstaking` from regular token transfers. This increases complexity for off-chain systems.
 
-
-# [I-01] Unused OracleAlreadyInitialized Error in Oracle Contract  
+### Recommendation
+Add clear events for staking/unstaking actions
+```solidity 
+event Staked(address indexed staker, uint80 amount);
+```
+```solidity
+emit Staked(msg.sender, amount);
+```
+# [I-04] Unused OracleAlreadyInitialized Error in Oracle Contract  
 
 ### Summary
 The `OracleAlreadyInitialized` error is defined in the `Oracle` contract and `IOracle` interface but is not used in the implementation, making it dead code.
@@ -825,49 +878,68 @@ error OracleAlreadyInitialized();
 - Manual code review
 
 ### Recommended Mitigation
-Remove the unused error from both the `Oracle` contract and `IOracle` interface:
+Remove the unused error from both the `Oracle` contract and `IOracle` interface
 
+# [I-05] Missing Zero-Value Check IN the Claim function
 
+The [Claim](https://github.com/SIR-trading/Core/blob/bb7d89b0fb3d2370142822bf1d50bfc194cdd598/src/Staker.sol#L366) function does not check if `dividends_ > 0` before continuing execution. This may lead to unnecessary state changes and zero-value ETH transfers, wasting gas.
 
+### Code Snippet
 
-#### **Description:**
-
-In the `stake()` function, the SIR protocol does not enforce a minimum non-zero stake. There is no check like `require(amount > 0)` to prevent users from staking 0 SIR. This means anyone can spam the contract with meaningless staking entries that contribute nothing to the system. These zero-value stakes still update internal mappings and the global `stakingParams.stake` via a temporary memory variable, causing unnecessary state growth.
-
-Because each stake operation initializes or updates a `Staker` struct, repeated `stake(0)` calls across multiple wallets can clutter the `_stakers` mapping and artificially inflate the perceived user base. This increases the size and complexity of on-chain data, causing long-term gas inefficiency and possibly leading to Denial of Service (DoS) if gas limits are eventually exceeded in aggregate stake accounting.
-
----
-
-
-#### **Proof of Concept:**
+The function does not check if `dividends_ > 0` before continuing execution. This may lead to unnecessary state changes and zero-value ETH transfers, wasting gas.
 
 ```solidity
-// Stake 0 SIR multiple times from multiple wallets
-sir.stake(0);
 
-// No revert, still creates entries in _stakers
-// Causes unnecessary updates to stakingParams and _supply tracking
+function claim() public returns (uint96 dividends_) {
+
+unchecked {
+
+SirStructs.StakingParams memory stakingParams_ = stakingParams;
+
+dividends_ = _dividends(balances[msg.sender], stakingParams_, _stakersParams[msg.sender]);
+
+  
+
+// Null the unclaimed dividends
+
+balances[msg.sender].unclaimedETH = 0;
+
+  
+
+// Update staker info
+
+_stakersParams[msg.sender].cumulativeETHPerSIRx80 = stakingParams_.cumulativeETHPerSIRx80;
+
+  
+
+// Update ETH _supply in the contract
+
+_supply.unclaimedETH -= dividends_;
+
+  
+
+// Emit event
+
+emit DividendsClaimed(msg.sender, dividends_);
+
+  
+
+// Transfer dividends
+
+(bool success, bytes memory data) = msg.sender.call{value: dividends_}("");
+
+if (!success) revert(string(data));
+
+}
+
+}
 ```
 
-#### **Recommended Mitigation:**
+### Impact 
+Gas inefficiency and unnecessary logs/operations. 
 
-Add a minimum stake check at the start of the `stake()` function:
+### Recommendation
+Add a check to skip execution if `dividends_` is 0.
 
-```solidity
-require(amount > 0, "Cannot stake zero");
-```
 
-Optionally, enforce a protocol-wide minimum stake threshold (e.g. `minStakeAmount`) configurable via governance to limit micro-stakes that could still be used for griefing.
-
----
-
-#### **Severity: Medium**
-
-* **Medium** It allows long-term protocol degradation and opens room for operational DoS if staker state becomes too large.
-
-**Likelihood: High**
-
-* Easy to exploit (no permission needed).
-* Cheap to execute repeatedly using multiple wallets.
-* No mitigation currently exists in the contract.
 
