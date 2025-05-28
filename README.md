@@ -1,111 +1,358 @@
 
+# [M-01] Signature Malleability in is possible in the permit Function
 
-# [H-01] Dividends Manipulation in Staker.sol via Stale `cumulativeETHPerSIRx80` Values in Staking/Unstaking Functions
+### Severity
+Impact: Medium
 
----
+Likelihood: Medium  
 
-**Description:**
-The issue arises from how the `cumulativeETHPerSIRx80` value is handled in the `stake()` and `unstake()` functions. When a user stakes or unstakes tokens, the `cumulativeETHPerSIRx80` value is not updated immediately to reflect the most recent changes. This results in **stale or outdated data** being used for dividend calculations. Specifically, when staking or unstaking, the protocol does not immediately update the `cumulativeETHPerSIRx80` value, allowing users to potentially exploit the system and receive more or fewer dividends than they are entitled to.
+### Description
 
----
+The `permit` function in the `Staker.sol` contract does not restrict the ECDSA signature’s `s value` to the lower half of the secp256k1 curve’s order `(s <= N/2, where N is 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141)`. This enables signature malleability, allowing a valid signature `(r, s, v)` to be transformed into another valid signature `(r, N - s, v')` without the private key.
+An attacker can exploit this by observing a user’s permit transaction in the mempool, computing the malleable signature, and submitting it with higher gas fees. If the attacker’s transaction is mined first, it consumes the user’s nonce `(nonces[owner])`, incrementing it from `n to n+1`. The user’s transaction then fails as the nonce in their signature `(n)` no longer matches `nonces[owner] (n+1)`, reverting with `InvalidSigner()`.
 
-#### **Impact:**
+```solidity
+    function permit(
+        address owner,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) public {
+        if (deadline < block.timestamp) revert PermitDeadlineExpired();
 
-1. **Incorrect Dividend Distribution:**
-   Since the dividend calculations depend on `cumulativeETHPerSIRx80`, using outdated or stale values can lead to **incorrect dividend payouts**. Users may either overclaim or underclaim rewards, leading to an unfair distribution of funds.
+        // Unchecked because the only math done is incrementing
+        // the owner's nonce which cannot realistically overflow.
+        unchecked {
+            address recoveredAddress = ecrecover(
+                keccak256(
+                    abi.encodePacked(
+                        "\x19\x01",
+                        DOMAIN_SEPARATOR(),
+                        keccak256(
+                            abi.encode(
+                                keccak256(
+                                    "Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"
+                                ),
+                                owner,
+                                spender,
+                                value,
+                                nonces[owner]++,
+                                deadline
+                            )
+                        )
+                    )
+                ),
+                v,
+                r,
+                s
+            );
 
-2. **Unfair Advantage to Users:**
-   Users can gain an unfair advantage by staking or unstaking at certain times when the `cumulativeETHPerSIRx80` value is outdated. This allows them to claim dividends based on stale data, which could be exploited to receive a disproportionate amount of rewards.
+            if (recoveredAddress == address(0) || recoveredAddress != owner) revert InvalidSigner();
 
-3. **Potential for Front-Running Attacks:**
-   The lack of immediate update for `cumulativeETHPerSIRx80` creates a potential attack vector where an attacker can **front-run** staking or unstaking actions. By exploiting the stale value, the attacker can optimize their staking/unstaking strategy to receive larger dividend payouts than they should.
+            allowance[recoveredAddress][spender] = value;
+        }
 
-4. **Economic Instability and Trust Issues:**
-   The inconsistencies in dividend calculations can lead to **economic instability** within the staking system. If users lose confidence in the fairness of the protocol, it may lead to reduced participation and a **loss of trust** in the staking mechanism.
+        emit Approval(owner, spender, value);
+    }
+```
+The lack of a check on the `s` value allows an attacker to submit a malleable signature, consuming the nonce and causing the user’s transaction to revert. This disrupts user transactions and potentially breaking downstream logic dependent on successful permit calls.
 
----
+### Recommendations
 
-#### **Proof of Concept:**
-Here is a step-by-step walkthrough of how an attack may occur due to the stale `cumulativeETHPerSIRx80` value:
-
-### 1. **Initial Conditions:**
-
-* The attacker is aware of the staking pool's state and the last update of `cumulativeETHPerSIRx80`.
-* There is a significant amount of unclaimed ETH in the system, which has accumulated over time.
-* The attacker monitors the `cumulativeETHPerSIRx80` value and identifies when it has not been updated for some time, meaning the value is stale.
-
-### 2. **Staking Activity:**
-
-* The attacker begins by staking a large amount of SIR tokens into the protocol at a time when the `cumulativeETHPerSIRx80` value is outdated. This action does not trigger an immediate update to the `cumulativeETHPerSIRx80` value.
-* The protocol incorrectly calculates the attacker’s dividends because it uses the stale `cumulativeETHPerSIRx80` value, which doesn’t reflect the current staking activity or the correct reward share for this user.
-
-### 3. **Timing for Unstaking or Re-staking:**
-
-* The attacker waits for a moment when the `cumulativeETHPerSIRx80` value is still stale, and they unstake or restake their tokens.
-* This action again does not update the `cumulativeETHPerSIRx80` immediately, allowing the attacker to exploit the stale value once more.
-* The attacker may execute a series of staking and unstaking actions, further manipulating the `cumulativeETHPerSIRx80` value to optimize their dividend payout.
-
-### 4. **Dividend Claiming:**
-
-* After performing these staking/unstaking actions, the attacker claims their dividends. Due to the stale `cumulativeETHPerSIRx80` value, the dividend calculations are incorrect.
-* The attacker receives more dividends than they should because the protocol incorrectly uses the outdated cumulative ETH values associated with their stake.
-
-### 5. **Final Outcome:**
-
-* The attacker continues this process until they have extracted a disproportionate amount of rewards, exploiting the protocol's failure to update critical state variables such as `cumulativeETHPerSIRx80`.
-* Users who follow the protocol correctly, staking and unstaking at the right times with correct calculations, will receive less in dividends as the attacker exploits the stale data.
-
----
-
-#### **Recommended Mitigation:**
-
-1. **Immediate Update of `cumulativeETHPerSIRx80`:**
-   The `cumulativeETHPerSIRx80` value should be immediately updated within the `stake()` and `unstake()` functions after each staking or unstaking action. This ensures that the value used for calculating dividends is always the most up-to-date.
-
-2. **Recalculation of Dividends:**
-   Ensure that dividends are recalculated with the latest `cumulativeETHPerSIRx80` value before any reward claims are processed. This can be achieved by directly updating or recalculating the `cumulativeETHPerSIRx80` value within the staking/unstaking functions.
-
-3. **Introduce Locking or Delayed Claim Mechanism:**
-   To prevent front-running, consider introducing a **lock** period or **delayed claim** mechanism. For example, implement a cooldown period between staking/unstaking actions and dividend claims, reducing the likelihood of front-running attacks.
-
-4. **Transparent Event Logging:**
-   Log the updates to the `cumulativeETHPerSIRx80` value and other relevant state variables after each staking and unstaking action. This enhances transparency and ensures that any discrepancies can be quickly identified during audits.
-
----
-
-#### **Severity Rating:** High
-This issue can lead to unfair dividend distribution, potential exploits, and a loss of trust in the protocol, making it a significant vulnerability.
-
----
-
-#### **Likelihood:** Medium
-While the issue is critical, it requires precise timing or front-running techniques to exploit the protocol. However, as the protocol becomes more active and widely used, the likelihood of exploitation increases.
-
----
-
-#### **Potential Exploits and Attack Vectors:**
-
-1. **Front-Running Exploits:**
-
-   * Attackers can exploit stale `cumulativeETHPerSIRx80` values by performing staking or unstaking actions at a specific time, taking advantage of outdated data to receive more dividends than they should.
-
-2. **Manipulation of Dividends:**
-   Users could manipulate their dividend claims by interacting with the protocol at a time when the `cumulativeETHPerSIRx80` value is outdated, giving them a financial advantage in terms of overclaimed rewards.
-
-3. **Economic Exploits via Stale Values:**
-   Users or bots may interact with the protocol in such a way as to trigger **reward inflation**, causing a misalignment in dividend distribution. This can destabilize the ecosystem and reduce user confidence in the system.
-
-4. **Denial of Service via Gas Exploitation:**
-   By manipulating the timing of staking/unstaking actions, attackers could potentially exploit gas costs or transaction timing to force inefficient contract execution, potentially leading to a **denial of service** scenario for others.
-
----
-
-In conclusion, the stale `cumulativeETHPerSIRx80` value handling in the `stake()` and `unstake()` functions introduces several significant risks, including economic exploits, unfair dividend distributions, and front-running vulnerabilities. Immediate updates and recalculations of this value, along with mechanisms to prevent front-running, are essential to mitigating these risks and ensuring the fairness and stability of the staking system.
-
----
+Enforce s <= N/2 by adding the following check before the ecrecover call:
+```solidity
+if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) revert InvalidSigner();
+```
 
 
-# [M-01] Failure to Handle Auction Winner Payment Failure Leads to Loss of Funds
+# [L-01] Type Mismatch in OracleInitialized and UniswapOracleProbed Events
+### Summary
+A type mismatch exists between the interface (`IOracle`) and implementation (`Oracle`) for the `avLiquidity` parameter in the `OracleInitialized` and `UniswapOracleProbed` events. The interface defines `avLiquidity` as `uint160`, while the implementation uses `uint136`.
+
+### Vulnerability Details
+- In the `IOracle` interface:
+  - `OracleInitialized` event: `avLiquidity` is `uint160`.
+  - `UniswapOracleProbed` event: `avLiquidity` is `uint160`.
+- In the `Oracle` contract:
+  - `OracleInitialized` event: `avLiquidity` is `uint136`.
+  - `UniswapOracleProbed` event: `avLiquidity` is `uint136`.
+- The mismatch occurs because the implementation uses `uint136` for `avLiquidity` (aligned with the `UniswapOracleData` struct), while the interface expects `uint160`.
+
+### Impact
+- ABI encoding/decoding inconsistencies may occur when interacting with the contract via the interface.
+- Off-chain applications parsing events may encounter errors or misinterpret data, expecting `uint160` instead of `uint136`.
+- Potential integration issues with tools or contracts relying on the interface's event signature.
+
+### Tools Used
+- Manual code review
+
+### Recommended Mitigation
+Update the `IOracle` interface to use `uint136` for `avLiquidity` in both events to match the implementation:
+
+```solidity
+event OracleInitialized(
+    address indexed token0,
+    address indexed token1,
+    uint24 indexed feeTierSelected,
+    uint136 avLiquidity,
+    uint40 period
+);
+
+event UniswapOracleProbed(
+    uint24 fee,
+    uint136 avLiquidity,
+    uint40 period,
+    uint16 cardinalityToIncrease
+);
+```
+
+# [L-02] Missing Input Validation In The stake Fucntion
+### Summary
+The `stake(uint80 amount)` function does not validate whether the input amount is greater than zero. As a result, it is possible for users to call the function with a zero value, leading to unnecessary state reads and writes, gas consumption, and emission of meaningless events.
+
+### Vulnerability Details
+```
+function stake(uint80 amount) public {
+    ...
+    uint80 newBalanceOfSIR = balance.balanceOfSIR - amount;
+
+    unchecked {
+        balances[msg.sender] = Balance(newBalanceOfSIR, _dividends(...));
+        stakerParams.stake += amount;
+        ...
+        emit Transfer(msg.sender, STAKING_VAULT, amount);
+    }
+}
+```
+When `amount == 0`, the function performs no meaningful state updates but still emits a Transfer event and consumes gas.
+
+### Impact
+- Users (or bots) can invoke the function with zero-value stakes, causing unnecessary computation and state transitions.
+
+- Emitting Transfer events with a zero amount can pollute the on-chain event history, making it harder to audit and increasing log indexing bloat.
+
+- Repeated zero-value transactions serve no useful purpose and may open the door to low-cost denial-of-service spam under certain conditions.
+
+### Recommended Mitigation
+Add a validation check to ensure that the staked amount is strictly greater than zero:
+
+```solidity
+require(amount > 0, "Cannot stake zero amount");
+```
+This prevents no-op transactions, improves clarity, and reduces unnecessary state changes and event emissions.
+
+# [L-03] Incorrect Tax Constraint Enforcement in StartLiquidityMining and ChangeLiquidityMining
+
+### Vulnerability Details
+`SirStructs` library specifies that vault taxes must satisfy `Σ_i (tax_i / type(uint8).max)^2 ≤ 0.1^2`. The `StartLiquidityMining` script sets `newTaxes[0] = 228`, `newTaxes[1] = 114`, yielding `(228/255)^2 + (114/255)^2 ≈ 0.998 < 0.01`. However, neither the script nor the `updateVaultsIssuances` function in `ISystemControl` programmatically validates this constraint. If the implementation fails to enforce it, adding more vaults or higher taxes could violate the constraint, causing reverts or incorrect reward distributions.
+
+### Impact
+
+- Violation of the tax constraint could halt vault updates or misallocate SIR rewards, affecting protocol fairness.
+
+### Recommended Mitigation
+Add a check in `updateVaultsIssuances` to enforce the tax constraint. Update scripts to validate taxes before submission.
+
+# [L-04] Undocumented Fee on TEA Token Minting
+
+### Summary
+The protocol documentation, specifically the section detailing the fee structure, focuses on fees generated from the minting and burning of APE tokens, which reward Liquidity Providers ("Gentlemen"). However, this documentation omits that a fee is also levied on Liquidity Providers themselves when they mint TEA tokens (i.e., when providing liquidity). The smart contracts implement this TEA minting fee, with the collected portion contributing to Protocol Owned Liquidity (POL). This discrepancy can lead to a misunderstanding of the complete fee mechanics for Liquidity Providers.
+
+### Description of Issue
+
+The provided documentation snippet concerning fees states
+
+```
+Vaults feature a fee system that rewards the gentlemen with significant fees from the minting and burning of APE tokens. These fees vary by vault, increasing with the vault's leverage ratio. Although these fees are substantial, they allow apes to hold APE tokens without incurring any maintenance fees, regardless of the holding period. The fees for minting or burning APE tokens are on par with the costs of holding a margin position for approximately one year, striking a balance between potential returns and upfront costs. This structure aims to benefit liquidity providers and encourage long-term traders, while short-term traders may not see their speculative positions fully materialize, essentially contributing more to the ecosystem's finances through these initial fees.
+```
+
+This section exclusively describes fees related to APE token activities and their role in rewarding Liquidity Providers. It does not mention any fees applicable to Liquidity Providers when they mint TEA tokens.
+
+However, an examination of the ```Vault.sol``` and ```TEA.sol``` contracts reveals the implementation of such a fee:
+
+- ```Vault.sol - _mint function:``` When a user mints TEA tokens (```isAPE == false```), the ```_mint``` function calls the mint function inherited from ```TEA.sol```. A comment within this block explicitly notes the distribution of fees to Protocol Owned Liquidity:
+
+```solidity
+// In Vault.sol, _mint function
+// ...
+} else {
+    // Mint TEA and distribute fees to protocol owned liquidity (POL)
+    (fees, amount) = mint( // This calls the mint function from TEA.sol
+        minter,
+        vaultParams.collateralToken,
+        vaultState.vaultId,
+        systemParams_,
+        vaultIssuanceParams_,
+        reserves,
+        collateralToDeposit
+    );
+}
+```
+ ```TEA.sol - mint function:``` This function, responsible for minting TEA tokens, clearly calculates and applies a fee based on ```systemParams_.lpFee.fee.``` The portion of TEA tokens corresponding to this fee is then minted to the protocol itself (```address(this)```), thereby increasing POL.
+
+```solidity
+// In TEA.sol, mint function
+// ...
+// Split collateralDeposited between minter and POL
+fees = Fees.feeMintTEA(collateralDeposited, systemParams_.lpFee.fee);
+
+// Minter's share of TEA
+// 'amount' is calculated based on fees.collateralInOrWithdrawn (net collateral)
+amount = FullMath.mulDiv(
+    amountToPOL,
+    fees.collateralInOrWithdrawn,
+    // ... (denominator logic) ...
+);
+
+// POL's share of TEA
+amountToPOL -= amount; // 'amountToPOL' initially represented total TEA from gross deposit
+
+// Update total supply and protocol balance
+// ...
+totalSupplyAndBalanceVault_.balanceVault += uint128(amountToPOL); // Protocol's TEA balance increases
+// ...
+
+// Emit (mint) transfer events
+emit TransferSingle(minter, address(0), minter, vaultId, amount); // To minter
+emit TransferSingle(minter, address(0), address(this), vaultId, amountToPOL); // Fee portion to protocol (POL)
+```
+This implemented fee on TEA minting is not reflected in the user-facing documentation regarding the protocol's fee structure.
+
+### Impact
+
+LPs might not be aware that a portion of their deposited collateral is effectively taken as a fee when minting TEA tokens, as the documentation focuses on APE token fees as their reward source. They might expect the amount of TEA tokens received to be directly proportional to their full collateral deposit.
+
+
+### Recommendation
+To ensure full transparency and align documentation with the on-chain behavior, it is recommended to update the protocol's fee documentation. The updated documentation should clearly
+
+1. State that a fee is applied when Liquidity Providers (Gentlemen) mint TEA tokens.
+2. Explain the basis for this fee calculation (e.g., derived from ```systemParams_.lpFee.fee```).
+3. Describe the purpose and destination of this fee, specifically its contribution to Protocol Owned Liquidity (POL), and briefly explain the benefits of POL to the ecosystem.
+
+
+# [L-05] Discrepancy in Saturation Price Calculation
+
+### Summary
+The ```_updateVaultState``` function calculates and stores a compressed representation of a vault's state, including ```tickPriceSatX42```, which defines the boundary between the "Power Zone" (ideal constant leverage) and the "Saturation Zone" (liquidity-constrained). Within the logic for the Saturation Zone, there is a significant discrepancy between the mathematical formula for the saturation price (```priceSat```) implied by the implemented code and the formula stated in the accompanying code comment. This can lead to the vault operating with an incorrect saturation price threshold, potentially affecting P&L calculations and the transition between operational zones.
+
+### Description of Issue
+The issue lies in the calculation of ```tickPriceSatX42``` when ```isPowerZone``` is ```false``` (i.e., the vault is determined to be in the Saturation Zone).
+
+**Commented Intention:** The code comment for the Saturation Zone states the target formula as:
+
+```plaintext
+/*
+    PRICE IN SATURATION ZONE
+    priceSat = r*price*L/R
+ */
+```
+Assuming ```price``` is the current price (```priceCurrent```), this implies ```priceSat / priceCurrent = (r * L) / R```. In tick space, this would translate to: ```tickSat - tickCurrent = tick( (r * L) / R )``` ````tickSat = tickCurrent + tick( (r * L) / R )```
+
+**Implemented Logic (for positive leverageTier):** The code calculates tickRatioX42 as:
+
+```solidity
+int256 tickRatioX42 = TickMathPrecision.getTickAtRatio(
+    uint256(vaultState.reserve) << absLeverageTier, // Numerator: R * (l-1)
+    (uint256(reserves.reserveLPers) << absLeverageTier) + reserves.reserveLPers // Denominator: L * l
+);
+// Where 'l' is the effective leverage factor (1 + 2^absLeverageTier)
+// and 'l-1' is (2^absLeverageTier)
+```
+So, ```tickRatioX42 = tick( (R * (l-1)) / (L * l) )```.
+
+Then, ```tickPriceSatX42``` is computed as:
+
+```solidity
+int256 tempTickPriceSatX42 = reserves.tickPriceX42 - tickRatioX42;
+```
+
+This means ```tickSat = tickCurrent - tick( (R * (l-1)) / (L * l) )```.
+
+Converting the implemented logic back to price terms: ```priceSat / priceCurrent = 1 / ( (R * (l-1)) / (L * l) ) priceSat / priceCurrent = (L * l) / (R * (l-1))``` So, ```priceSat = priceCurrent * (L * l) / (R * (l-1))```.
+
+The implemented formula ```priceSat = priceCurrent * (L * l) / (R * (l-1))``` does not match the commented formula ```priceSat = r * price * L / R```. For the two to be equivalent,```r``` would need to be equal to ```l / (l-1)```. If ```r``` is intended to be simply ```l``` (the leverage factor), or another distinct system parameter, the implementation is incorrect relative to the comment.
+
+### Impact
+If the commented formula (```priceSat = r*price*L/R```) represents the true intended mathematical model for the saturation price in this zone, then the current implementation is incorrect. This would lead to:
+
+- Incorrect ```tickPriceSatX42``` Storage: The on-chain ```tickPriceSatX42``` will not accurately reflect the intended saturation threshold.
+- The point at which the vault's behavior (and thus P&L calculations for LPers and Apes) transitions from the Power Zone to the Saturation Zone (and vice-versa, as determined by comparing the current market price tick with ```tickPriceSatX42``` in the ```VaultExternal.getReserves``` function) will be based on this potentially incorrect value.
+- Depending on how ```tickPriceSatX42``` influences the distribution of value between LPers and Apes (especially how ```reserveApes``` and ```reserveLPers``` are calculated in ```VaultExternal._getReserves``` based on this stored ```tickPriceSatX42```), an incorrect saturation threshold could lead to unfair or unintended economic outcomes for participants. For example, it might cause the system to enter or exit the "fixed DBT value for LPs" mode at the wrong price points.
+
+### Recommendation
+
+If the formula in the comment** (```priceSat = r*price*L/R```) is correct, the Solidity implementation for calculating ```tickRatioX42``` and its subsequent application (addition or subtraction, and the ratio itself) must be revised to accurately reflect this formula.
+
+If the current code's derived formula** (```priceSat = priceCurrent * (L*l) / (R*(l-1))```) is correct and intended, then the comment must be updated to accurately describe the implemented logic. The definition and role of ```r``` (if it's different from ```l/(l-1)```) would also need clarification.
+
+
+# [L-06] Inconsistent Staker Fee Calculation and Documentation in feeAPE
+
+### Summary
+The ```feeAPE``` function in the ```Fees.sol``` library calculates fees paid by users ("Apes") when minting or burning APE tokens. A portion of this fee is intended for SIR stakers, determined by a ```tax``` parameter. However, there is a significant discrepancy between the NatSpec documentation, an inline code comment, and the actual implemented formula regarding the percentage of the total fee allocated to stakers. This inconsistency can lead to misconfiguration, incorrect expectations about fee distribution, and reduced clarity of the protocol's economic model.
+
+### Description of Issue
+Within the ```feeAPE``` function in ```Fees.sol```, the calculation for ```fees.collateralFeeToStakers``` exhibits conflicting information:
+
+**NatSpec Documentation:**
+
+```solidity
+/** @notice APES pay a fee to the LPers when they mint/burn APE
+    @notice If a non-zero tax is set for the vault, 10% of the fee is sent to SIR stakers // <-- States 10%
+    @param tax Tax in basis points charged to the apes for getting SIR // <-- Describes tax as basis points, but it's uint8
+ */
+```
+The NatSpec suggests that if ```tax``` is non-zero, a fixed ```10%``` of the total APE fee goes to stakers. It also describes ```tax``` as "Tax in basis points," but the parameter type is ```uint8```.
+
+**Inline Code Comment:**
+
+```solidity
+// Depending on the tax, between 0 and 20% of the fee is for SIR stakers // <-- States 0-20%
+fees.collateralFeeToStakers = uint144((totalFees * tax) / (20 * uint256(type(uint8).max)));
+```
+An inline comment directly above the calculation suggests the staker's fee portion can range **between 0 and 20%**.
+
+**Actual Implemented Formula:**
+
+```solidity
+fees.collateralFeeToStakers = uint144((totalFees * tax) / (20 * uint256(type(uint8).max)));
+```
+Let's analyze this formula:
+
+- ```tax``` is a ```uint8```, so ```type(uint8).max``` is ```255```.
+- The denominator is ```20 * 255 = 5100```.
+- **The formula is effectively:** ```fees.collateralFeeToStakers = (totalFees * tax) / 5100```.
+- If ```tax = 0```, then ```collateralFeeToStakers = 0```.
+- If ```tax = 255``` (the maximum value for a ```uint8```), then: ```collateralFeeToStakers = (totalFees * 255) / (20 * 255) = totalFees / 20 = 0.05 * totalFees```.
+- This means the implemented formula results in the stakers receiving **between 0% and 5%** of the ```totalFees```, scaled linearly by the ```tax``` parameter (0-255).
+  
+There is a clear three-way mismatch:
+
+- NatSpec implies a fixed 10% (if ```tax``` is active).
+- Inline comment suggests a 0-20% range.
+- The code implements a 0-5% range, scaled by the ```uint8``` tax parameter. Additionally, the NatSpec description of tax as "basis points" conflicts with its ```uint8``` type and how it's used in the 0-5% scaling formula.
+  
+### Impact
+This inconsistency has several negative impacts:
+
+- Users, developers, and auditors relying on the NatSpec or inline comments will have an incorrect understanding of the actual fee distribution to stakers.
+- The true percentage of APE fees allocated to stakers is a key economic lever for the protocol. The conflicting information obscures the intended design and actual outcome.
+- If governance or administrators set the tax parameter for vaults based on the assumption that it corresponds to a 10% rate or a 0-20% range, the actual staker revenue will be significantly different (0-5%), leading to outcomes that don't match intent.
+
+### Recommendation
+
+- If the current 0-5% scaled by ```uint8 tax``` is the intended logic, then both the NatSpec and the inline comment are incorrect and must be updated. The NatSpec description of ```tax``` as "basis points" also needs correction.
+- If, for example, a fixed 10% (when ```tax > 0```) is intended, the formula should be changed to ```fees.collateralFeeToStakers = tax > 0 ? uint144((totalFees * 10) / 100) : 0;```.
+- If a 0-20% range scaled by ```uint8 tax``` is intended, the formula should be ```fees.collateralFeeToStakers = uint144((totalFees * tax) / (5 * uint256(type(uint8).max)))```;.
+  
+Update All Documentation: Once the code reflects the true intention, all NatSpec comments and inline code comments related to this fee calculation must be updated to be consistent and accurately describe the implemented logic and the role of the tax parameter.
+  
+
+# [L-07] Failure to Handle Auction Winner Payment Failure Leads to Loss of Funds
 ## Summary
 The `collectFeesAndStartAuction` function in the `Staker.sol` contract does not check the success status of the `_payAuctionWinner` call. If the transfer of the auction lot to the previous winner fails (e.g., due to a problematic token or recipient), the function proceeds as if the payment was successful, causing the previous winner to lose their lot, which is then included in the subsequent auction.
 
@@ -598,296 +845,6 @@ This test demonstrates that Alice's winning lot was not transferred to her and w
 ## Recommendation
 The `collectFeesAndStartAuction` function should check the boolean return value of the `_payAuctionWinner` call. If the previous auction had a bid (`auction.bid > 0`) and the payment failed (`!paymentSuccessful`), the function should revert. This prevents the previous winner's lot from being lost and ensures the auction state remains consistent, potentially allowing the previous winner to claim via `getAuctionLot` later or enabling manual intervention.
 
-# [M-02] Signature Malleability in is possible in the permit Function
-
-### Severity
-Impact: Medium
-
-Likelihood: Medium  
-
-### Description
-
-The `permit` function in the `Staker.sol` contract does not restrict the ECDSA signature’s `s value` to the lower half of the secp256k1 curve’s order `(s <= N/2, where N is 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141)`. This enables signature malleability, allowing a valid signature `(r, s, v)` to be transformed into another valid signature `(r, N - s, v')` without the private key.
-An attacker can exploit this by observing a user’s permit transaction in the mempool, computing the malleable signature, and submitting it with higher gas fees. If the attacker’s transaction is mined first, it consumes the user’s nonce `(nonces[owner])`, incrementing it from `n to n+1`. The user’s transaction then fails as the nonce in their signature `(n)` no longer matches `nonces[owner] (n+1)`, reverting with `InvalidSigner()`.
-
-```solidity
-    function permit(
-        address owner,
-        address spender,
-        uint256 value,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) public {
-        if (deadline < block.timestamp) revert PermitDeadlineExpired();
-
-        // Unchecked because the only math done is incrementing
-        // the owner's nonce which cannot realistically overflow.
-        unchecked {
-            address recoveredAddress = ecrecover(
-                keccak256(
-                    abi.encodePacked(
-                        "\x19\x01",
-                        DOMAIN_SEPARATOR(),
-                        keccak256(
-                            abi.encode(
-                                keccak256(
-                                    "Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"
-                                ),
-                                owner,
-                                spender,
-                                value,
-                                nonces[owner]++,
-                                deadline
-                            )
-                        )
-                    )
-                ),
-                v,
-                r,
-                s
-            );
-
-            if (recoveredAddress == address(0) || recoveredAddress != owner) revert InvalidSigner();
-
-            allowance[recoveredAddress][spender] = value;
-        }
-
-        emit Approval(owner, spender, value);
-    }
-```
-The lack of a check on the `s` value allows an attacker to submit a malleable signature, consuming the nonce and causing the user’s transaction to revert. This disrupts user transactions and potentially breaking downstream logic dependent on successful permit calls.
-
-### Recommendations
-
-Enforce s <= N/2 by adding the following check before the ecrecover call:
-```solidity
-if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) revert InvalidSigner();
-```
-
-
-# [L-01] Type Mismatch in OracleInitialized and UniswapOracleProbed Events
-### Summary
-A type mismatch exists between the interface (`IOracle`) and implementation (`Oracle`) for the `avLiquidity` parameter in the `OracleInitialized` and `UniswapOracleProbed` events. The interface defines `avLiquidity` as `uint160`, while the implementation uses `uint136`.
-
-### Vulnerability Details
-- In the `IOracle` interface:
-  - `OracleInitialized` event: `avLiquidity` is `uint160`.
-  - `UniswapOracleProbed` event: `avLiquidity` is `uint160`.
-- In the `Oracle` contract:
-  - `OracleInitialized` event: `avLiquidity` is `uint136`.
-  - `UniswapOracleProbed` event: `avLiquidity` is `uint136`.
-- The mismatch occurs because the implementation uses `uint136` for `avLiquidity` (aligned with the `UniswapOracleData` struct), while the interface expects `uint160`.
-
-### Impact
-- ABI encoding/decoding inconsistencies may occur when interacting with the contract via the interface.
-- Off-chain applications parsing events may encounter errors or misinterpret data, expecting `uint160` instead of `uint136`.
-- Potential integration issues with tools or contracts relying on the interface's event signature.
-
-### Tools Used
-- Manual code review
-
-### Recommended Mitigation
-Update the `IOracle` interface to use `uint136` for `avLiquidity` in both events to match the implementation:
-
-```solidity
-event OracleInitialized(
-    address indexed token0,
-    address indexed token1,
-    uint24 indexed feeTierSelected,
-    uint136 avLiquidity,
-    uint40 period
-);
-
-event UniswapOracleProbed(
-    uint24 fee,
-    uint136 avLiquidity,
-    uint40 period,
-    uint16 cardinalityToIncrease
-);
-```
-
-# [L-02] Missing Input Validation In The stake Fucntion
-### Summary
-The `stake(uint80 amount)` function does not validate whether the input amount is greater than zero. As a result, it is possible for users to call the function with a zero value, leading to unnecessary state reads and writes, gas consumption, and emission of meaningless events.
-
-### Vulnerability Details
-```
-function stake(uint80 amount) public {
-    ...
-    uint80 newBalanceOfSIR = balance.balanceOfSIR - amount;
-
-    unchecked {
-        balances[msg.sender] = Balance(newBalanceOfSIR, _dividends(...));
-        stakerParams.stake += amount;
-        ...
-        emit Transfer(msg.sender, STAKING_VAULT, amount);
-    }
-}
-```
-When `amount == 0`, the function performs no meaningful state updates but still emits a Transfer event and consumes gas.
-
-### Impact
-- Users (or bots) can invoke the function with zero-value stakes, causing unnecessary computation and state transitions.
-
-- Emitting Transfer events with a zero amount can pollute the on-chain event history, making it harder to audit and increasing log indexing bloat.
-
-- Repeated zero-value transactions serve no useful purpose and may open the door to low-cost denial-of-service spam under certain conditions.
-
-### Recommended Mitigation
-Add a validation check to ensure that the staked amount is strictly greater than zero:
-
-```solidity
-require(amount > 0, "Cannot stake zero amount");
-```
-This prevents no-op transactions, improves clarity, and reduces unnecessary state changes and event emissions.
-
-# [L-03] Incorrect Tax Constraint Enforcement in StartLiquidityMining and ChangeLiquidityMining
-
-### Vulnerability Details
-`SirStructs` library specifies that vault taxes must satisfy `Σ_i (tax_i / type(uint8).max)^2 ≤ 0.1^2`. The `StartLiquidityMining` script sets `newTaxes[0] = 228`, `newTaxes[1] = 114`, yielding `(228/255)^2 + (114/255)^2 ≈ 0.998 < 0.01`. However, neither the script nor the `updateVaultsIssuances` function in `ISystemControl` programmatically validates this constraint. If the implementation fails to enforce it, adding more vaults or higher taxes could violate the constraint, causing reverts or incorrect reward distributions.
-
-### Impact
-
-- Violation of the tax constraint could halt vault updates or misallocate SIR rewards, affecting protocol fairness.
-
-### Recommended Mitigation
-Add a check in `updateVaultsIssuances` to enforce the tax constraint. Update scripts to validate taxes before submission.
-
-# [L-04] Undocumented Fee on TEA Token Minting
-
-### Summary
-The protocol documentation, specifically the section detailing the fee structure, focuses on fees generated from the minting and burning of APE tokens, which reward Liquidity Providers ("Gentlemen"). However, this documentation omits that a fee is also levied on Liquidity Providers themselves when they mint TEA tokens (i.e., when providing liquidity). The smart contracts implement this TEA minting fee, with the collected portion contributing to Protocol Owned Liquidity (POL). This discrepancy can lead to a misunderstanding of the complete fee mechanics for Liquidity Providers.
-
-### Description of Issue
-
-The provided documentation snippet concerning fees states
-
-```
-Vaults feature a fee system that rewards the gentlemen with significant fees from the minting and burning of APE tokens. These fees vary by vault, increasing with the vault's leverage ratio. Although these fees are substantial, they allow apes to hold APE tokens without incurring any maintenance fees, regardless of the holding period. The fees for minting or burning APE tokens are on par with the costs of holding a margin position for approximately one year, striking a balance between potential returns and upfront costs. This structure aims to benefit liquidity providers and encourage long-term traders, while short-term traders may not see their speculative positions fully materialize, essentially contributing more to the ecosystem's finances through these initial fees.
-```
-
-This section exclusively describes fees related to APE token activities and their role in rewarding Liquidity Providers. It does not mention any fees applicable to Liquidity Providers when they mint TEA tokens.
-
-However, an examination of the ```Vault.sol``` and ```TEA.sol``` contracts reveals the implementation of such a fee:
-
-- ```Vault.sol - _mint function:``` When a user mints TEA tokens (```isAPE == false```), the ```_mint``` function calls the mint function inherited from ```TEA.sol```. A comment within this block explicitly notes the distribution of fees to Protocol Owned Liquidity:
-
-```solidity
-// In Vault.sol, _mint function
-// ...
-} else {
-    // Mint TEA and distribute fees to protocol owned liquidity (POL)
-    (fees, amount) = mint( // This calls the mint function from TEA.sol
-        minter,
-        vaultParams.collateralToken,
-        vaultState.vaultId,
-        systemParams_,
-        vaultIssuanceParams_,
-        reserves,
-        collateralToDeposit
-    );
-}
-```
- ```TEA.sol - mint function:``` This function, responsible for minting TEA tokens, clearly calculates and applies a fee based on ```systemParams_.lpFee.fee.``` The portion of TEA tokens corresponding to this fee is then minted to the protocol itself (```address(this)```), thereby increasing POL.
-
-```solidity
-// In TEA.sol, mint function
-// ...
-// Split collateralDeposited between minter and POL
-fees = Fees.feeMintTEA(collateralDeposited, systemParams_.lpFee.fee);
-
-// Minter's share of TEA
-// 'amount' is calculated based on fees.collateralInOrWithdrawn (net collateral)
-amount = FullMath.mulDiv(
-    amountToPOL,
-    fees.collateralInOrWithdrawn,
-    // ... (denominator logic) ...
-);
-
-// POL's share of TEA
-amountToPOL -= amount; // 'amountToPOL' initially represented total TEA from gross deposit
-
-// Update total supply and protocol balance
-// ...
-totalSupplyAndBalanceVault_.balanceVault += uint128(amountToPOL); // Protocol's TEA balance increases
-// ...
-
-// Emit (mint) transfer events
-emit TransferSingle(minter, address(0), minter, vaultId, amount); // To minter
-emit TransferSingle(minter, address(0), address(this), vaultId, amountToPOL); // Fee portion to protocol (POL)
-```
-This implemented fee on TEA minting is not reflected in the user-facing documentation regarding the protocol's fee structure.
-
-### Impact
-
-LPs might not be aware that a portion of their deposited collateral is effectively taken as a fee when minting TEA tokens, as the documentation focuses on APE token fees as their reward source. They might expect the amount of TEA tokens received to be directly proportional to their full collateral deposit.
-
-
-### Recommendation
-To ensure full transparency and align documentation with the on-chain behavior, it is recommended to update the protocol's fee documentation. The updated documentation should clearly
-
-1. State that a fee is applied when Liquidity Providers (Gentlemen) mint TEA tokens.
-2. Explain the basis for this fee calculation (e.g., derived from ```systemParams_.lpFee.fee```).
-3. Describe the purpose and destination of this fee, specifically its contribution to Protocol Owned Liquidity (POL), and briefly explain the benefits of POL to the ecosystem.
-
-
-# [L-05] Discrepancy in Saturation Price Calculation
-
-### Summary
-The ```_updateVaultState``` function calculates and stores a compressed representation of a vault's state, including ```tickPriceSatX42```, which defines the boundary between the "Power Zone" (ideal constant leverage) and the "Saturation Zone" (liquidity-constrained). Within the logic for the Saturation Zone, there is a significant discrepancy between the mathematical formula for the saturation price (```priceSat```) implied by the implemented code and the formula stated in the accompanying code comment. This can lead to the vault operating with an incorrect saturation price threshold, potentially affecting P&L calculations and the transition between operational zones.
-
-### Description of Issue
-The issue lies in the calculation of ```tickPriceSatX42``` when ```isPowerZone``` is ```false``` (i.e., the vault is determined to be in the Saturation Zone).
-
-**Commented Intention:** The code comment for the Saturation Zone states the target formula as:
-
-```plaintext
-/*
-    PRICE IN SATURATION ZONE
-    priceSat = r*price*L/R
- */
-```
-Assuming ```price``` is the current price (```priceCurrent```), this implies ```priceSat / priceCurrent = (r * L) / R```. In tick space, this would translate to: ```tickSat - tickCurrent = tick( (r * L) / R )``` ````tickSat = tickCurrent + tick( (r * L) / R )```
-
-**Implemented Logic (for positive leverageTier):** The code calculates tickRatioX42 as:
-
-```solidity
-int256 tickRatioX42 = TickMathPrecision.getTickAtRatio(
-    uint256(vaultState.reserve) << absLeverageTier, // Numerator: R * (l-1)
-    (uint256(reserves.reserveLPers) << absLeverageTier) + reserves.reserveLPers // Denominator: L * l
-);
-// Where 'l' is the effective leverage factor (1 + 2^absLeverageTier)
-// and 'l-1' is (2^absLeverageTier)
-```
-So, ```tickRatioX42 = tick( (R * (l-1)) / (L * l) )```.
-
-Then, ```tickPriceSatX42``` is computed as:
-
-```solidity
-int256 tempTickPriceSatX42 = reserves.tickPriceX42 - tickRatioX42;
-```
-
-This means ```tickSat = tickCurrent - tick( (R * (l-1)) / (L * l) )```.
-
-Converting the implemented logic back to price terms: ```priceSat / priceCurrent = 1 / ( (R * (l-1)) / (L * l) ) priceSat / priceCurrent = (L * l) / (R * (l-1))``` So, ```priceSat = priceCurrent * (L * l) / (R * (l-1))```.
-
-The implemented formula ```priceSat = priceCurrent * (L * l) / (R * (l-1))``` does not match the commented formula ```priceSat = r * price * L / R```. For the two to be equivalent,```r``` would need to be equal to ```l / (l-1)```. If ```r``` is intended to be simply ```l``` (the leverage factor), or another distinct system parameter, the implementation is incorrect relative to the comment.
-
-### Impact
-If the commented formula (```priceSat = r*price*L/R```) represents the true intended mathematical model for the saturation price in this zone, then the current implementation is incorrect. This would lead to:
-
-- Incorrect ```tickPriceSatX42``` Storage: The on-chain ```tickPriceSatX42``` will not accurately reflect the intended saturation threshold.
-- The point at which the vault's behavior (and thus P&L calculations for LPers and Apes) transitions from the Power Zone to the Saturation Zone (and vice-versa, as determined by comparing the current market price tick with ```tickPriceSatX42``` in the ```VaultExternal.getReserves``` function) will be based on this potentially incorrect value.
-- Depending on how ```tickPriceSatX42``` influences the distribution of value between LPers and Apes (especially how ```reserveApes``` and ```reserveLPers``` are calculated in ```VaultExternal._getReserves``` based on this stored ```tickPriceSatX42```), an incorrect saturation threshold could lead to unfair or unintended economic outcomes for participants. For example, it might cause the system to enter or exit the "fixed DBT value for LPs" mode at the wrong price points.
-
-### Recommendation
-
-If the formula in the comment** (```priceSat = r*price*L/R```) is correct, the Solidity implementation for calculating ```tickRatioX42``` and its subsequent application (addition or subtraction, and the ratio itself) must be revised to accurately reflect this formula.
-
-If the current code's derived formula** (```priceSat = priceCurrent * (L*l) / (R*(l-1))```) is correct and intended, then the comment must be updated to accurately describe the implemented logic. The definition and role of ```r``` (if it's different from ```l/(l-1)```) would also need clarification.
-  
 
 # [I-01] Missing Error Message in onlyVault Modifier Require Statement
 
