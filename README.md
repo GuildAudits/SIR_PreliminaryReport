@@ -353,10 +353,10 @@ Update All Documentation: Once the code reflects the true intention, all NatSpec
   
 
 # [L-07] Failure to Handle Auction Winner Payment Failure Leads to Loss of Funds
-## Summary
+### Summary
 The `collectFeesAndStartAuction` function in the `Staker.sol` contract does not check the success status of the `_payAuctionWinner` call. If the transfer of the auction lot to the previous winner fails (e.g., due to a problematic token or recipient), the function proceeds as if the payment was successful, causing the previous winner to lose their lot, which is then included in the subsequent auction.
 
-## Finding Description
+### Finding Description
 The `Staker.sol` contract manages token auctions where users bid WETH to win lots of various ERC20 tokens collected as fees. The process involves settling a previous auction and starting a new one via the `collectFeesAndStartAuction` function.
 
 The internal function `_payAuctionWinner(address token, SirStructs.Auction memory auction, address beneficiary)` is designed to transfer the auctioned `token` amount (`auction.bid`) to the `beneficiary` (or `auction.bidder` if `beneficiary` is `address(0)`). Crucially, `_payAuctionWinner` is designed *not* to revert on transfer failure. Instead, it uses low-level calls and returns a boolean: `true` on success, `false` on failure. Failures can occur for various reasons, including:
@@ -377,10 +377,10 @@ The security guarantee broken is the **fair distribution of auction winnings**. 
 
 This is in contrast to the `getAuctionLot` function, which correctly checks the return value of `_payAuctionWinner` and reverts if the payment fails, allowing the winner to potentially try claiming again or for the issue to be addressed.
 
-## Impact Explanation
+### Impact Explanation
 This issue is assessed as **High** severity. A successful exploit or even an accidental trigger (e.g., a user winning an auction for a token that becomes temporarily untransferable) leads to a direct and unrecoverable loss of funds for the user who won the previous auction. Their rightful winnings are effectively stolen and given to the winner of the next auction for the same token. This breaks a core promise of the auction mechanism – that the winner receives the lot they bid on.
 
-## Likelihood Explanation
+### Likelihood Explanation
 The likelihood is assessed as **Medium**. While standard tokens like WETH, USDC, or DAI are unlikely to cause `_payAuctionWinner` to fail under normal circumstances, the protocol is designed to auction *any* ERC20 token collected as fees. The broader DeFi ecosystem includes tokens with various non-standard behaviors, such as:
 *   **Fee-on-transfer tokens:** Attempting to transfer the exact balance might fail if the token requires a fee deduction from the sender's balance.
 *   **Tokens with transfer restrictions:** Blacklisting, whitelisting, pausing, or other access control mechanisms can prevent transfers to specific addresses or under certain conditions.
