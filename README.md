@@ -352,7 +352,7 @@ This inconsistency has several negative impacts:
 Update All Documentation: Once the code reflects the true intention, all NatSpec comments and inline code comments related to this fee calculation must be updated to be consistent and accurately describe the implemented logic and the role of the tax parameter.
   
 
-# [L-07] Failure to Handle Auction Winner Payment Failure Leads to Loss of Funds
+# [L-07] Unhandled Auction Winner Payment Failures May Result in Fund Loss
 ### Summary
 The `collectFeesAndStartAuction` function in the `Staker.sol` contract does not check the success status of the `_payAuctionWinner` call. If the transfer of the auction lot to the previous winner fails (e.g., due to a problematic token or recipient), the function proceeds as if the payment was successful, causing the previous winner to lose their lot, which is then included in the subsequent auction.
 
